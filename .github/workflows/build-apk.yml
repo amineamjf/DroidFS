@@ -1,0 +1,132 @@
+name: build-apk
+
+# Full build: FFmpeg, libgocryptfs, libcryfs (via Gradle/CMake), Gradle unit tests, signed APK.
+#
+# Signing:
+#  - If the repository secrets KEYSTORE_BASE64, KEYSTORE_PASSWORD and KEY_ALIAS exist,
+#    the APK is signed with that keystore (key password = KEYSTORE_PASSWORD, or KEY_PASSWORD if set).
+#  - Otherwise a throwaway key is generated for this run. Such an APK installs fine for testing,
+#    but it cannot update an install signed with another key, and must not be distributed.
+
+on:
+  push:
+    branches: [amin-cipher-android]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: "ABI to build (arm64-v8a, armeabi-v7a, x86, x86_64) or 'all'"
+        default: arm64-v8a
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ABI: ${{ inputs.abi || 'arm64-v8a' }}
+  NDK_VERSION: 28.2.13676358
+  CMAKE_VERSION: 4.1.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install Android NDK and CMake
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config
+
+      - name: Build FFmpeg
+        run: |
+          set -euo pipefail
+          if [ "$ABI" = "all" ]; then app/ffmpeg/build.sh; else app/ffmpeg/build.sh "$ABI"; fi
+
+      - name: Build libgocryptfs
+        run: |
+          set -euo pipefail
+          if [ "$ABI" = "all" ]; then app/libgocryptfs/build.sh; else app/libgocryptfs/build.sh "$ABI"; fi
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ "$ABI" != "all" ]; then ARGS+=("-Pabi=$ABI"); fi
+          ./gradlew testDebugUnitTest "${ARGS[@]}"
+
+      - name: Build release APK
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ "$ABI" != "all" ]; then ARGS+=("-Pabi=$ABI" "-Pnouniversal"); fi
+          ./gradlew assembleRelease "${ARGS[@]}"
+
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          KS="$RUNNER_TEMP/signing.jks"
+          if [ -n "${KEYSTORE_BASE64:-}" ] && [ -n "${KEYSTORE_PASSWORD:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+            STORE_PASS="$KEYSTORE_PASSWORD"
+            KEY_PASS="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+            ALIAS="$KEY_ALIAS"
+            LABEL=signed
+          else
+            STORE_PASS="$(openssl rand -hex 24)"
+            KEY_PASS="$STORE_PASS"
+            ALIAS=ephemeral
+            LABEL=ephemeral-signed
+            keytool -genkeypair -keystore "$KS" -storepass "$STORE_PASS" -keypass "$KEY_PASS" \
+              -alias "$ALIAS" -keyalg EC -groupname secp256r1 -validity 30 -dname "CN=DroidFS CI ephemeral"
+          fi
+          mkdir -p signed
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          [ ${#apks[@]} -gt 0 ] || { echo "No APK produced" >&2; exit 1; }
+          for apk in "${apks[@]}"; do
+            out="signed/$(basename "${apk%.apk}")-$LABEL.apk"
+            "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$STORE_PASS" --key-pass "pass:$KEY_PASS" \
+              --ks-key-alias "$ALIAS" --out "$out" "$apk"
+            "$BT/apksigner" verify --verbose "$out"
+          done
+          rm -f "$KS"
+          if [ "$LABEL" = ephemeral-signed ]; then
+            echo "APKs in this run are signed with a throwaway key: test only, cannot update other installs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DroidFS-apk-${{ env.ABI }}
+          path: signed/*.apk
+          if-no-files-found: error
+          retention-days: 14
