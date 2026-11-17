@@ -50,13 +50,13 @@ jobs:
           curl -fsSL -o kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip
           unzip -q kotlin.zip
 
-      - name: Compile
+      - name: Compile (all cipher sources except the Android-only Keystore wrapper, tested in android-instrumented)
         run: |
           set -euo pipefail
           T="$RUNNER_TEMP/tools"
           "$T/kotlinc/bin/kotlinc" -jvm-target 17 -cp "$T/junit.jar:$T/hamcrest.jar:$T/bcprov.jar" \
             -d "$RUNNER_TEMP/out" \
-            app/src/main/java/sushi/hardcore/droidfs/cipher/*.kt \
+            $(ls app/src/main/java/sushi/hardcore/droidfs/cipher/*.kt | grep -v KeystoreKeyWrapper.kt) \
             app/src/test/java/sushi/hardcore/droidfs/cipher/*.kt
 
       - name: Run tests
