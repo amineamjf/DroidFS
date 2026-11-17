@@ -4,12 +4,8 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
-import java.security.GeneralSecurityException
 import java.security.MessageDigest
 import java.security.SecureRandom
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 import sushi.hardcore.droidfs.cipher.CipherFormat as F
 
 /**
@@ -35,11 +31,11 @@ object FileCipher {
         try {
             val fixedPrefix = fixedPrefix()
             val wrapNonce = randomBytes(F.NONCE_SIZE)
-            val wrappedKey = gcm(Cipher.ENCRYPT_MODE, masterKey, wrapNonce, fixedPrefix, fileKey)
+            val wrappedKey = Aead.encrypt(masterKey, wrapNonce, fixedPrefix, fileKey)
             val streamPrefix = randomBytes(F.STREAM_PREFIX_SIZE)
             val metadataNonce = randomBytes(F.NONCE_SIZE)
             val metadataAad = fixedPrefix + wrapNonce + wrappedKey + streamPrefix
-            val metadataCiphertext = gcm(Cipher.ENCRYPT_MODE, fileKey, metadataNonce, metadataAad, metadata.serialize())
+            val metadataCiphertext = Aead.encrypt(fileKey, metadataNonce, metadataAad, metadata.serialize())
             check(metadataCiphertext.size <= F.MAX_METADATA_CIPHERTEXT)
 
             val header = ByteArrayOutputStream().apply {
@@ -59,7 +55,7 @@ object FileCipher {
                 val lookAhead = if (length == buffer.size) input.read() else -1
                 val last = lookAhead == -1
                 val nonce = chunkNonce(streamPrefix, counter, last)
-                output.write(gcm(Cipher.ENCRYPT_MODE, fileKey, nonce, chunkAad, buffer, 0, length))
+                output.write(Aead.encrypt(fileKey, nonce, chunkAad, buffer, 0, length))
                 if (last) break
                 buffer[0] = lookAhead.toByte()
                 length = 1 + readFully(input, buffer, 1, buffer.size - 1)
@@ -92,7 +88,7 @@ object FileCipher {
                 val lookAhead = if (length == buffer.size) input.read() else -1
                 val last = lookAhead == -1
                 val nonce = chunkNonce(header.streamPrefix, counter, last)
-                val plaintext = gcmDecrypt(header.fileKey, nonce, header.chunkAad, buffer, 0, length)
+                val plaintext = Aead.decrypt(header.fileKey, nonce, header.chunkAad, buffer, 0, length)
                 output.write(plaintext)
                 total += plaintext.size
                 plaintext.fill(0)
@@ -148,10 +144,10 @@ object FileCipher {
         val metadataNonce = readExactly(input, F.NONCE_SIZE)
         val metadataCiphertext = readExactly(input, metadataLength)
 
-        val fileKey = gcmDecrypt(masterKey, wrapNonce, fixedPrefix, wrappedKey, 0, wrappedKey.size)
+        val fileKey = Aead.decrypt(masterKey, wrapNonce, fixedPrefix, wrappedKey, 0, wrappedKey.size)
         try {
             val metadataAad = fixedPrefix + wrapNonce + wrappedKey + streamPrefix
-            val metadataPlain = gcmDecrypt(fileKey, metadataNonce, metadataAad, metadataCiphertext, 0, metadataCiphertext.size)
+            val metadataPlain = Aead.decrypt(fileKey, metadataNonce, metadataAad, metadataCiphertext, 0, metadataCiphertext.size)
             val metadata = try {
                 FileMetadata.parse(metadataPlain)
             } finally {
@@ -184,21 +180,6 @@ object FileCipher {
         nonce[10] = counter.toByte()
         nonce[11] = if (last) 1 else 0
         return nonce
-    }
-
-    private fun gcm(mode: Int, key: ByteArray, nonce: ByteArray, aad: ByteArray, data: ByteArray, offset: Int = 0, length: Int = data.size): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(mode, SecretKeySpec(key, "AES"), GCMParameterSpec(F.TAG_SIZE * 8, nonce))
-        cipher.updateAAD(aad)
-        return cipher.doFinal(data, offset, length)
-    }
-
-    private fun gcmDecrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, data: ByteArray, offset: Int, length: Int): ByteArray {
-        try {
-            return gcm(Cipher.DECRYPT_MODE, key, nonce, aad, data, offset, length)
-        } catch (e: GeneralSecurityException) {
-            throw CipherAuthException("Authentication failed: wrong key or corrupted data", e)
-        }
     }
 
     private fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)

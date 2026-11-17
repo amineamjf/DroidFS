@@ -63,5 +63,8 @@ open class CipherException(message: String, cause: Throwable? = null) : IOExcept
 /** The data is not a valid DFSC file (bad magic, unsupported version, truncated, malformed). */
 class CipherFormatException(message: String) : CipherException(message)
 
+/** A recovery code is malformed (wrong length, invalid characters or bad checksum, typically a typo). */
+class InvalidRecoveryCodeException(message: String) : CipherException(message)
+
 /** Authentication failed: wrong key, or the data has been modified. The two cases are not distinguishable. */
 class CipherAuthException(message: String, cause: Throwable? = null) : CipherException(message, cause)

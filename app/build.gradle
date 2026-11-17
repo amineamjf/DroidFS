@@ -160,5 +160,8 @@ dependencies {
     implementation "com.google.auto.value:auto-value-annotations:$autoValueVersion"
     annotationProcessor "com.google.auto.value:auto-value:$autoValueVersion"
 
+    // Argon2id (pure Java) for the master key vault
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.87'
+
     testImplementation 'junit:junit:4.13.2'
 }
