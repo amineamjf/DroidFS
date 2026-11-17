@@ -39,6 +39,7 @@ android {
         targetSdkVersion 36
         versionCode 41
         versionName "2.3.3"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField "boolean", "CRYFS_DISABLED", "${project.ext.disableCryFS}"
         buildConfigField "boolean", "GOCRYPTFS_DISABLED", "${project.ext.disableGocryptfs}"
@@ -164,4 +165,6 @@ dependencies {
     implementation 'org.bouncycastle:bcprov-jdk18on:1.87'
 
     testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
 }

@@ -1,0 +1,92 @@
+name: android-instrumented
+
+# Runs the instrumented tests (app/src/androidTest) on an x86_64 Android emulator:
+# Android Keystore wrapping and the cipher core on Android's own crypto provider.
+# gocryptfs and CryFS are disabled here because these tests do not touch them (faster build);
+# the full build is covered by build-apk.yml.
+
+on:
+  push:
+    branches: [amin-cipher-android]
+    paths:
+      - 'app/src/main/java/sushi/hardcore/droidfs/cipher/**'
+      - 'app/src/androidTest/**'
+      - 'app/build.gradle'
+      - '.github/workflows/android-instrumented.yml'
+      - '.github/scripts/emulator-tests.sh'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-instrumented-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 28.2.13676358
+  CMAKE_VERSION: 4.1.2
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init required submodules
+        run: git submodule update --init --recursive --depth 1 libpdfviewer app/ffmpeg/ffmpeg
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android NDK and CMake
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config
+
+      - name: Build FFmpeg (x86_64)
+        run: app/ffmpeg/build.sh x86_64
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run instrumented tests on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: .github/scripts/emulator-tests.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f emulator-logcat.txt ]; then
+            { echo '### Emulator measurements'; echo '```'; cat emulator-logcat.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: androidTest-reports
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            emulator-logcat.txt
+          if-no-files-found: ignore
+          retention-days: 14
